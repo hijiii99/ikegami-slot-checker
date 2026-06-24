@@ -2,7 +2,7 @@ name: 池上教習所 空き枠チェック
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # 30分毎（UTC）
+    - cron: '*/10 * * * *'   # 10分毎（UTC）
   workflow_dispatch:           # 手動実行ボタン（テスト用）
 
 jobs:
