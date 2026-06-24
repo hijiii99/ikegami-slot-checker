@@ -79,7 +79,7 @@ def main():
 
         page.locator('input[type="text"]:visible').first.fill(LOGIN_ID)
         page.locator('input[type="password"]:visible').first.fill(PASSWORD)
-        pw_field.press("Enter")
+        page.locator('input[type="password"]:visible').first.press("Enter")
         page.wait_for_load_state("networkidle")
         print("ログイン完了")
 
