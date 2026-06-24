@@ -2,12 +2,12 @@ name: 池上教習所 空き枠チェック
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
-  workflow_dispatch:
+    - cron: '*/30 * * * *'   # 30分毎（UTC）
+  workflow_dispatch:           # 手動実行ボタン（テスト用）
 
 jobs:
   check-slots:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
@@ -30,5 +30,4 @@ jobs:
           ELICENSE_LOGIN_ID:          ${{ secrets.ELICENSE_LOGIN_ID }}
           ELICENSE_PASSWORD:          ${{ secrets.ELICENSE_PASSWORD }}
           LINE_CHANNEL_ACCESS_TOKEN:  ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_USER_ID:               ${{ secrets.LINE_USER_ID }}
         run: python check_slots.py
