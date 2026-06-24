@@ -1,85 +1,42 @@
 """
 池上教習所 技能予約 空き通知スクリプト
 - e-licenseにログインし、5週分のカレンダーを巡回
-- 緑セル（予約可能）を検出したらLINEに通知
+- td.status1（予約可能セル）を検出したらLINEに通知
 """
 
 import os
 import re
-import sys
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 # ── 環境変数（GitHub Secrets から取得） ─────────────────────────────────────
-LOGIN_URL       = "https://www.e-license.jp/el32/mSg1DWxRvAI-brGQYS-1OA%3D%3D"
-LOGIN_ID        = os.environ["ELICENSE_LOGIN_ID"]
-PASSWORD        = os.environ["ELICENSE_PASSWORD"]
-LINE_TOKEN      = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-LINE_USER_ID    = os.environ["LINE_USER_ID"]
+LOGIN_URL    = "https://www.e-license.jp/el32/mSg1DWxRvAI-brGQYS-1OA%3D%3D"
+LOGIN_ID     = os.environ["ELICENSE_LOGIN_ID"]
+PASSWORD     = os.environ["ELICENSE_PASSWORD"]
+LINE_TOKEN   = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+LINE_USER_ID = os.environ["LINE_USER_ID"]
 
-WEEKS_TO_CHECK  = 5   # 今週 + 4週先まで確認
-
-
-# ── 色判定：緑かどうか ──────────────────────────────────────────────────────
-def is_green(rgb_str: str) -> bool:
-    """
-    CSS の rgb(R, G, B) 文字列を受け取り、緑系かどうかを返す。
-    e-license の緑は概ね rgb(144,238,144) や rgb(0,176,80) 系。
-    """
-    m = re.match(r"rgb\(\s*(\d+),\s*(\d+),\s*(\d+)\s*\)", rgb_str)
-    if not m:
-        return False
-    r, g, b = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    # 白・グレーを除外し、緑が支配的な色を検出
-    if r > 230 and g > 230 and b > 230:
-        return False          # ほぼ白
-    if abs(r - g) < 20 and abs(g - b) < 20:
-        return False          # グレー系
-    return g > r and g > b and g > 100
+WEEKS_TO_CHECK = 5   # 今週 + 4週先まで確認
 
 
-# ── 1週分のカレンダーをスクレイプ ──────────────────────────────────────────
+# ── 1週分の空き枠を取得 ──────────────────────────────────────────────────────
 def scrape_week(page) -> list[str]:
-    """現在表示されている週の緑セルを返す（例: ["6月25日(木) 17:00〜", ...]）"""
-
-    # ---- 時刻ヘッダーを取得 ----
-    # e-license のカレンダーは <table> 構造。
-    # 1行目 th に「1\n9:00」「2\n10:00」の形で入っている。
-    time_labels = []
-    header_ths = page.locator("table th").all()
-    for th in header_ths:
-        text = th.inner_text().strip()
-        # "1\n9:00" → "9:00" だけ抽出
-        m = re.search(r"(\d{1,2}:\d{2})", text)
-        if m:
-            time_labels.append(m.group(1))
-
-    # ---- 日付行を取得 ----
+    """
+    td.status1 内の <a class="simei"> のデータ属性から空き枠を取得。
+    同じ枠が2つのテーブルレイアウトに重複して存在するため seen で重複除去。
+    """
+    seen = set()
     slots = []
-    rows = page.locator("table tr").all()
 
-    col_index = 0
-    for row in rows:
-        # 行の最初のセル（日付）
-        first_cell = row.locator("td:first-child, th:first-child").first
-        date_text = first_cell.inner_text().strip()
-
-        # 日付っぽくないヘッダー行はスキップ
-        if not re.search(r"\d+月\d+日", date_text):
-            continue
-
-        # この行のデータセル（日付列を除いた td）
-        cells = row.locator("td").all()
-        # 最初の td が日付なら 1 つ飛ばす
-        start = 1 if len(cells) > len(time_labels) else 0
-
-        for i, cell in enumerate(cells[start:]):
-            bg = cell.evaluate(
-                "el => window.getComputedStyle(el).backgroundColor"
-            )
-            if is_green(bg):
-                time_str = time_labels[i] if i < len(time_labels) else f"時限{i+1}"
-                slots.append(f"{date_text} {time_str}〜")
+    anchors = page.locator("td.status1 a.simei").all()
+    for a in anchors:
+        date = a.get_attribute("data-date") or ""   # 例: "7月16日"
+        week = a.get_attribute("data-week") or ""   # 例: "(木)"
+        time = a.get_attribute("data-time") or ""   # 例: "17:00"
+        key  = f"{date}{week}_{time}"
+        if key not in seen:
+            seen.add(key)
+            slots.append(f"{date}{week} {time}〜")
 
     return slots
 
@@ -113,35 +70,20 @@ def main():
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
+        page    = browser.new_page()
         page.set_default_timeout(30_000)
 
         # ── ログイン ──
         print(f"ログインページを開きます: {LOGIN_URL}")
         page.goto(LOGIN_URL, wait_until="networkidle")
 
-        # フォームのセレクタ（e-license の実際の name 属性に合わせる）
-        # ログインIDフィールド
-        id_field = page.locator(
-            'input[name="loginId"], input[name="userId"], '
-            'input[type="text"]:visible'
-        ).first
-        id_field.fill(LOGIN_ID)
-
-        # パスワードフィールド
-        pw_field = page.locator('input[type="password"]:visible').first
-        pw_field.fill(PASSWORD)
-
-        # ログインボタン
-        page.locator(
-            'input[type="submit"]:visible, button[type="submit"]:visible, '
-            'button:has-text("ログイン"):visible'
-        ).first.click()
-
+        page.locator('input[type="text"]:visible').first.fill(LOGIN_ID)
+        page.locator('input[type="password"]:visible').first.fill(PASSWORD)
+        page.locator('input[type="submit"]:visible, button[type="submit"]:visible').first.click()
         page.wait_for_load_state("networkidle")
         print("ログイン完了")
 
-        # ── 技能予約ページへ移動（まだそこでなければ） ──
+        # ── 技能予約ページへ（必要なら） ──
         if "技能予約" not in page.content():
             try:
                 page.locator("text=技能予約").first.click()
@@ -152,11 +94,9 @@ def main():
 
         # ── 週ごとに巡回 ──
         for week_num in range(WEEKS_TO_CHECK):
-            # 表示中の週タイトルを取得
+            # 週のタイトルを取得（例: "7月15日～7月21日の 技能予約"）
             try:
-                title = page.locator(
-                    "h2:visible, h3:visible, .week-title:visible"
-                ).first.inner_text().strip()
+                title = page.locator("#ginou-title").inner_text().strip()
             except Exception:
                 title = f"第{week_num + 1}週"
 
@@ -167,9 +107,7 @@ def main():
 
             # 最終週以外は「次週へ」をクリック
             if week_num < WEEKS_TO_CHECK - 1:
-                next_btn = page.locator(
-                    'text=次週へ, input[value*="次週"], a:has-text("次週")'
-                )
+                next_btn = page.locator("button.nextWeek")
                 if next_btn.count() == 0:
                     print("「次週へ」ボタンが見つかりません。ここで終了します。")
                     break
