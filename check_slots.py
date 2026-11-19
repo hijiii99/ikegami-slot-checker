@@ -1,7 +1,8 @@
 """
 池上教習所 技能予約 空き通知スクリプト
 - e-licenseにログインし、5週分のカレンダーを巡回
-- 予約済みの最新日程より前の空き枠（td.status1）を検出
+- 締切日（DEADLINE）以前の空き枠（td.status1）を検出
+  ※ 現在の予約の有無には関係なく通知する
 - LINE友だち全員にブロードキャスト通知
 """
 
@@ -15,28 +16,22 @@ LOGIN_ID   = os.environ["ELICENSE_LOGIN_ID"]
 PASSWORD   = os.environ["ELICENSE_PASSWORD"]
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 
+# この日付「以前（当日を含む）」の空き枠を通知する（YYYYMMDD）
+# 環境変数 DEADLINE で上書き可能
+DEADLINE = os.environ.get("DEADLINE", "20261202")
+
 WEEKS_TO_CHECK = 5   # 今週 + 4週先まで確認
 
 
 # ── 1週分のスクレイプ ─────────────────────────────────────────────────────────
-def scrape_week(page) -> tuple[list[str], list[tuple[str, str]]]:
+def scrape_week(page) -> list[tuple[str, str]]:
     """
     Returns:
-      reserved_dates : 予約済みの YYYYMMDD リスト
       available_slots: (YYYYMMDD, 表示文字列) のリスト
     重複は seen で除去。
     """
-    seen_res = set()
-    seen_avl = set()
-    reserved_dates = []
+    seen = set()
     available_slots = []
-
-    # 予約済み: td.status3 > a.cancel
-    for a in page.locator("td.status3 a.cancel").all():
-        ymd = a.get_attribute("data-yoyaku") or ""
-        if ymd and ymd not in seen_res:
-            seen_res.add(ymd)
-            reserved_dates.append(ymd)
 
     # 空き枠: td.status1 > a.simei
     for a in page.locator("td.status1 a.simei").all():
@@ -45,16 +40,16 @@ def scrape_week(page) -> tuple[list[str], list[tuple[str, str]]]:
         week = a.get_attribute("data-week")   or ""
         time = a.get_attribute("data-time")   or ""
         key  = f"{ymd}_{time}"
-        if key not in seen_avl:
-            seen_avl.add(key)
+        if key not in seen:
+            seen.add(key)
             available_slots.append((ymd, f"{date}{week} {time}〜"))
 
-    return reserved_dates, available_slots
+    return available_slots
 
 
 # ── LINE ブロードキャスト ─────────────────────────────────────────────────────
-def send_line_broadcast(slots: list[str], latest_reserved_display: str) -> None:
-    lines = [f"【池上教習所】{latest_reserved_reply}より前に空きがあります！\n"]
+def send_line_broadcast(slots: list[str], deadline_display: str) -> None:
+    lines = [f"【池上教習所】{deadline_display}までに空きがあります！\n"]
     for s in slots:
         lines.append(f"・{s}")
     lines.append(f"\n▶ 予約する\n{LOGIN_URL}")
@@ -72,9 +67,13 @@ def send_line_broadcast(slots: list[str], latest_reserved_display: str) -> None:
     print(f"LINE ブロードキャスト送信完了 (status={resp.status_code})")
 
 
+def ymd_to_display(ymd: str) -> str:
+    """20261202 → 12月2日"""
+    return f"{int(ymd[4:6])}月{int(ymd[6:8])}日"
+
+
 # ── メイン ───────────────────────────────────────────────────────────────────
 def main():
-    all_reserved: list[str]              = []
     all_available: list[tuple[str, str]] = []
 
     with sync_playwright() as pw:
@@ -109,11 +108,14 @@ def main():
                 title = f"第{week_num + 1}週"
 
             print(f"[{week_num + 1}/{WEEKS_TO_CHECK}] {title} をチェック中...")
-            reserved, available = scrape_week(page)
-            print(f"  予約済み日程: {reserved}")
+            available = scrape_week(page)
             print(f"  空き枠: {[a[1] for a in available]}")
-            all_reserved.extend(reserved)
             all_available.extend(available)
+
+            # 締切日を過ぎた週まで見たら、それ以上先は不要
+            if available and min(a[0] for a in available) > DEADLINE:
+                print("  締切日より先の週に到達したので巡回を終了します。")
+                break
 
             if week_num < WEEKS_TO_CHECK - 1:
                 next_btn = page.locator("button.nextWeek")
@@ -125,36 +127,23 @@ def main():
 
         browser.close()
 
-    # ── フィルタリング ──
-    if not all_reserved:
-        print("予約済み日程が見つかりませんでした。通知をスキップします。")
-        return
+    # ── フィルタリング：締切日以前（当日を含む）の空き枠 ──
+    print(f"\n締切日: {DEADLINE}（この日までの空き枠を通知）")
 
-    # 最新の予約日（YYYYMMDD の文字列比較で最大値）
-    latest_ymd = max(all_reserved)
-    print(f"\n最新予約日: {latest_ymd}（これより前の空き枠のみ通知）")
-
-    # 最新予約日より前（strictly before）の空き枠を収集
     seen = set()
     filtered = []
     for ymd, display in all_available:
-        if ymd < latest_ymd and display not in seen:
+        if ymd and ymd <= DEADLINE and display not in seen:
             seen.add(display)
             filtered.append(display)
 
     print(f"フィルタ後の空き枠: {filtered}")
 
     if filtered:
-        # 表示用に最新予約日を変換（20260630 → 6月30日）
-        y, m, d = latest_ymd[:4], latest_ymd[4:6].lstrip("0"), latest_ymd[6:].lstrip("0")
-        latest_display = f"{m}月{d}日"
-        global latest_reserved_reply
-        latest_reserved_reply = latest_display
-        send_line_broadcast(filtered, latest_display)
+        send_line_broadcast(filtered, ymd_to_display(DEADLINE))
     else:
         print("条件に合う空き枠なし → 通知スキップ")
 
 
 if __name__ == "__main__":
-    latest_reserved_reply = ""
     main()
