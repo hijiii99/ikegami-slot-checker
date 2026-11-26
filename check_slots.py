@@ -17,8 +17,7 @@ PASSWORD   = os.environ["ELICENSE_PASSWORD"]
 LINE_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 
 # この日付「以前（当日を含む）」の空き枠を通知する（YYYYMMDD）
-# 環境変数 DEADLINE で上書き可能
-DEADLINE = os.environ.get("DEADLINE", "20261202")
+DEADLINE = "20261206"
 
 WEEKS_TO_CHECK = 5   # 今週 + 4週先まで確認
 
